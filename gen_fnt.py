@@ -9,6 +9,15 @@ Modified to output JSON format
 """
 
 import os
+vipsbin = r'C:\Users\EYHN\Downloads\vips-dev-w64-web-8.17.0\vips-dev-8.17\bin'
+add_dll_dir = getattr(os, 'add_dll_directory', None)
+if callable(add_dll_dir):
+    os.environ['PATH'] = os.pathsep.join((vipsbin, os.environ['PATH']))
+    add_dll_dir(vipsbin)
+else:
+    os.environ['PATH'] = os.pathsep.join((vipsbin, os.environ['PATH']))
+
+
 from functools import reduce
 from PIL import Image
 import os
@@ -19,6 +28,8 @@ from io import BytesIO
 
 PAGE_SIZE = 1024
 CHAR_SIZE = 50
+
+RESOURCE_DIR = ["./noto-emoji/png/128", "./noto-emoji/third_party/region-flags/waved-svg"]
 
 def render_svg_to_image(svg_path, size):
     """
@@ -87,7 +98,8 @@ def render_svg_to_image(svg_path, size):
 class FntConfig:
     def __init__(self):
         self.info = {
-            "face": "Noto Color Emoji"
+            "face": "Noto Color Emoji",
+            "size": CHAR_SIZE
         }
 
         self.common = {
@@ -198,53 +210,53 @@ class TextureMerger:
     def get_images(self):
         valid_count = 0
         
-        # Define directories and their file types to process
-        directories = [
-            ('png', 'png'),
-            ('region-svg', 'svg')
-        ]
-        
-        for dir_name, file_ext in directories:
-            if os.path.exists(dir_name):
-                files = os.listdir(dir_name)
-                print(f"Processing {len(files)} {file_ext.upper()} files in {dir_name} directory...")
+        # Process all directories in RESOURCE_DIR
+        for resource_dir in RESOURCE_DIR:
+            if not os.path.exists(resource_dir):
+                print(f"Resource directory not found: {resource_dir}")
+                continue
                 
-                for filename in files:
-                    if '.' not in filename:
+            files = os.listdir(resource_dir)
+            print(f"Processing {len(files)} files in {resource_dir} directory...")
+            
+            for filename in files:
+                if '.' not in filename:
+                    continue
+                name, ext = filename.split('.')
+                
+                # Process files based on their extension, not directory name
+                if ext.lower() in ['png', 'svg']:
+                    full_path = os.path.join(resource_dir, filename)
+                    
+                    # Use the same naming logic for both PNG and SVG files
+                    try:
+                        if len(name) == 1:
+                            # Single character files
+                            new_char = CharDef(ord(name), full_path)
+                            self.charset.add_new_char(new_char)
+                            valid_count += 1
+                        elif name[0:2] == '__' and name[2:].isdigit():
+                            # Files with __<number> format
+                            new_char = CharDef(int(name[2:]), full_path)
+                            self.charset.add_new_char(new_char)
+                            valid_count += 1
+                        elif name.startswith('emoji_u'):
+                            # Extract hex codes from emoji_u<hexcode1>_<hexcode2>_... format
+                            hex_parts = name[7:].split('_')  # Remove 'emoji_u' prefix and split by '_'
+                            unicode_codes = []
+                            for hex_part in hex_parts:
+                                if hex_part:  # Skip empty parts
+                                    unicode_codes.append(int(hex_part, 16))
+                            if unicode_codes:  # Only process if we have valid codes
+                                new_char = CharDef(unicode_codes, full_path)
+                                self.charset.add_new_char(new_char)
+                                valid_count += 1
+                    except ValueError as e:
+                        print(f"Skipping file with invalid format {filename}: {e}")
                         continue
-                    name, ext = filename.split('.')
-                    if ext.lower() == file_ext:
-                        full_path = os.path.join(dir_name, filename)
-                        
-                        # Use the same naming logic for both PNG and SVG files
-                        try:
-                            if len(name) == 1:
-                                # Single character files
-                                new_char = CharDef(ord(name), full_path)
-                                self.charset.add_new_char(new_char)
-                                valid_count += 1
-                            elif name[0:2] == '__' and name[2:].isdigit():
-                                # Files with __<number> format
-                                new_char = CharDef(int(name[2:]), full_path)
-                                self.charset.add_new_char(new_char)
-                                valid_count += 1
-                            elif name.startswith('emoji_u'):
-                                # Extract hex codes from emoji_u<hexcode1>_<hexcode2>_... format
-                                hex_parts = name[7:].split('_')  # Remove 'emoji_u' prefix and split by '_'
-                                unicode_codes = []
-                                for hex_part in hex_parts:
-                                    if hex_part:  # Skip empty parts
-                                        unicode_codes.append(int(hex_part, 16))
-                                if unicode_codes:  # Only process if we have valid codes
-                                    new_char = CharDef(unicode_codes, full_path)
-                                    self.charset.add_new_char(new_char)
-                                    valid_count += 1
-                        except ValueError as e:
-                            print(f"Skipping file with invalid format {filename}: {e}")
-                            continue
-                        except Exception as e:
-                            print(f"Failed to process {filename}: {e}")
-                            continue
+                    except Exception as e:
+                        print(f"Failed to process {filename}: {e}")
+                        continue
         
         print(f"Found {valid_count} valid characters total")
         self.charset.sort_for_texture()
