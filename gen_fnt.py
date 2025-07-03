@@ -5,65 +5,114 @@ gen_fnt (https://github.com/aillieo/bitmap-font-generator)
 Fast and easy way to generate bitmap font with images
 Created by Aillieo on 2017-09-06
 With Python 3.5
+Modified to output JSON format
 """
 
+import os
 from functools import reduce
 from PIL import Image
 import os
 import re
+import json
+import pyvips
+from io import BytesIO
 
+PAGE_SIZE = 1024
+CHAR_SIZE = 50
 
-def format_str(func):
-    def wrapper(*args, **kw):
-        ret = func(*args, **kw)
-        ret = re.sub(r'[\(\)\{\}]', "", ret)
-        ret = re.sub(r'\'(?P<name>\w+)\': ', r"\g<name>=", ret)
-        ret = re.sub(r', (?P<name>\w+)=', r" \g<name>=", ret)
-        # Remove spaces after commas (for padding and spacing values)
-        ret = re.sub(r', ', ",", ret)
-        ret = ret.replace("'", '"')
-        return ret
-
-    return wrapper
+def render_svg_to_image(svg_path, size):
+    """
+    Render SVG file to PIL Image with specified size using pyvips.
+    Handles SVG files that contain references to other SVG files.
+    """
+    try:
+        # First, check if the SVG file contains a reference to another SVG file
+        with open(svg_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        
+        # Check if the content is just a filename (not actual SVG content)
+        if not content.startswith('<') and content.endswith('.svg'):
+            # This file contains a reference to another SVG file
+            referenced_file = content.strip()
+            svg_dir = os.path.dirname(svg_path)
+            referenced_path = os.path.join(svg_dir, referenced_file)
+            
+            if os.path.exists(referenced_path):
+                # Use the referenced file instead
+                svg_path = referenced_path
+            else:
+                print(f"Referenced SVG file not found: {referenced_path}")
+                return None
+        
+        # Load SVG with pyvips and specify size
+        image = pyvips.Image.new_from_file(svg_path, dpi=72, scale=1.0)
+        
+        # Calculate scale factor to resize to target size
+        width, height = image.width, image.height
+        scale_factor = min(size / width, size / height)
+        
+        # Resize the image
+        if scale_factor != 1.0:
+            new_width = int(width * scale_factor)
+            new_height = int(height * scale_factor)
+            image = image.resize(scale_factor)
+        else:
+            new_width, new_height = width, height
+        
+        # Create a square canvas and center the image
+        if new_width != size or new_height != size:
+            # Create white background
+            background = pyvips.Image.black(size, size, bands=4)
+            background = background + [255, 255, 255, 0]  # Transparent background
+            
+            # Calculate position to center the image
+            left = (size - new_width) // 2
+            top = (size - new_height) // 2
+            
+            # Composite the image onto the background
+            image = background.composite2(image, 'over', x=left, y=top)
+        
+        # Convert to PNG bytes
+        png_bytes = image.write_to_buffer('.png')
+        
+        # Create PIL Image from PNG bytes
+        img = Image.open(BytesIO(png_bytes))
+            
+        return img
+    except Exception as e:
+        print(f"Error rendering SVG {svg_path}: {e}")
+        return None
 
 
 class FntConfig:
     def __init__(self):
         self.info = {
-            "face": "Noto Color Emoji",
-            "size": 16,
-            "bold": 0,
-            "italic": 0,
-            "charset": "",
-            "unicode": 1,
-            "stretchH": 100,
-            "smooth": 1,
-            "aa": 1,
-            "padding": (0, 0, 0, 0),
-            "spacing": (1, 1),
+            "face": "Noto Color Emoji"
         }
 
         self.common = {
-            "lineHeight": 100,
-            "base": 79,
-            "scaleW": 1024,
-            "scaleH": 1024,
-            "pages": 1,
-            "packed": 0
+            "lineHeight": CHAR_SIZE,
+            "base": int(CHAR_SIZE * 0.79)
         }
 
         self.pages = {}
 
-    @format_str
-    def __str__(self):
-        return 'info ' + str(self.info) + '\ncommon ' + str(self.common) + '\n'
+    def to_dict(self):
+        # Return dictionary representation for JSON output
+        return {
+            "info": self.info,
+            "common": self.common
+        }
 
 
 class CharDef:
-    def __init__(self, id, file):
+    def __init__(self, codes, file):
         self.file = file
+        # Convert single code to list for consistency
+        if isinstance(codes, int):
+            codes = [codes]
         self.param = {
-            "id": id,
+            "code": codes,
             "x": 0,
             "y": 0,
             "width": 0,
@@ -72,25 +121,34 @@ class CharDef:
             "yoffset": 0,
             "xadvance": 0,
             "page": 0,
-            "chnl": 15
         }
-        img = Image.open(self.file)
-        # Resize image to 100x100 pixels
-        img = img.resize((100, 100), Image.Resampling.LANCZOS)
+        
+        # Check if file is SVG or PNG
+        if file.lower().endswith('.svg'):
+            # Render SVG to image
+            img = render_svg_to_image(file, CHAR_SIZE)
+            if img is None:
+                raise ValueError(f"Failed to render SVG: {file}")
+        else:
+            # Load PNG image
+            img = Image.open(self.file)
+            # Resize image to CHAR_SIZE x CHAR_SIZE pixels
+            img = img.resize((CHAR_SIZE, CHAR_SIZE), Image.Resampling.LANCZOS)
+        
         # Save the resized image for texture generation
         self.resized_img = img
         self.ini_with_texture_size(img.size)
 
-    @format_str
-    def __str__(self):
-        return 'char ' + str(self.param)
+    def to_dict(self):
+        # Return dictionary representation for JSON output
+        return self.param
 
     def ini_with_texture_size(self, size):
-        padding = fnt_config.info["padding"]
+        padding = (0, 0, 0, 0)
         self.param["width"], self.param["height"] = size[0] + padding[1] + padding[3], size[1] + padding[0] + padding[2]
-        self.param["xadvance"] = size[0]
         self.param["xoffset"] = - padding[1]
         self.param["yoffset"] = - padding[0]
+        self.param["xadvance"] = size[0]
 
     def set_texture_position(self, position):
         self.param["x"], self.param["y"] = position
@@ -103,10 +161,12 @@ class CharSet:
     def __init__(self):
         self.chars = []
 
-    def __str__(self):
-        ret = 'chars count=' + str(len(self.chars)) + '\n'
-        ret += reduce(lambda char1, char2: str(char1) + str(char2) + "\n", self.chars, "")
-        return ret
+    def to_dict(self):
+        # Return dictionary representation for JSON output
+        return {
+            "count": len(self.chars),
+            "chars": [char.to_dict() for char in self.chars]
+        }
 
     def add_new_char(self, new_char):
         self.chars.append(new_char)
@@ -123,9 +183,9 @@ class PageDef:
             "file": file
         }
 
-    @format_str
-    def __str__(self):
-        return 'page ' + str(self.param)
+    def to_dict(self):
+        # Return dictionary representation for JSON output
+        return self.param
 
 
 class TextureMerger:
@@ -136,38 +196,57 @@ class TextureMerger:
         self.page_name_base = fnt_name
 
     def get_images(self):
-        png_dir = 'png'
-        if not os.path.exists(png_dir):
-            png_dir = '.'  # fallback to current directory
-        files = os.listdir(png_dir)
-        print(f"Processing {len(files)} files in {png_dir} directory...")
         valid_count = 0
-        for filename in files:
-            if '.' not in filename:
-                continue
-            name, ext = filename.split('.')
-            if ext.lower() == 'png':
-                full_path = os.path.join(png_dir, filename)
-                if len(name) == 1:
-                    new_char = CharDef(ord(name), full_path)
-                    self.charset.add_new_char(new_char)
-                    valid_count += 1
-                elif name[0:2] == '__' and name[2:].isdigit():
-                    new_char = CharDef(int(name[2:]), full_path)
-                    self.charset.add_new_char(new_char)
-                    valid_count += 1
-                elif name.startswith('emoji_u') and '_' not in name[7:]:
-                    # Extract hex code from emoji_u<hexcode> format, ignore all emojis with modifiers
-                    hex_part = name[7:]  # Remove 'emoji_u' prefix
-                    try:
-                        unicode_code = int(hex_part, 16)
-                        new_char = CharDef(unicode_code, full_path)
-                        self.charset.add_new_char(new_char)
-                        valid_count += 1
-                    except ValueError:
-                        # Skip files with invalid hex codes
+        
+        # Define directories and their file types to process
+        directories = [
+            ('png', 'png'),
+            ('region-svg', 'svg')
+        ]
+        
+        for dir_name, file_ext in directories:
+            if os.path.exists(dir_name):
+                files = os.listdir(dir_name)
+                print(f"Processing {len(files)} {file_ext.upper()} files in {dir_name} directory...")
+                
+                for filename in files:
+                    if '.' not in filename:
                         continue
-        print(f"Found {valid_count} valid characters")
+                    name, ext = filename.split('.')
+                    if ext.lower() == file_ext:
+                        full_path = os.path.join(dir_name, filename)
+                        
+                        # Use the same naming logic for both PNG and SVG files
+                        try:
+                            if len(name) == 1:
+                                # Single character files
+                                new_char = CharDef(ord(name), full_path)
+                                self.charset.add_new_char(new_char)
+                                valid_count += 1
+                            elif name[0:2] == '__' and name[2:].isdigit():
+                                # Files with __<number> format
+                                new_char = CharDef(int(name[2:]), full_path)
+                                self.charset.add_new_char(new_char)
+                                valid_count += 1
+                            elif name.startswith('emoji_u'):
+                                # Extract hex codes from emoji_u<hexcode1>_<hexcode2>_... format
+                                hex_parts = name[7:].split('_')  # Remove 'emoji_u' prefix and split by '_'
+                                unicode_codes = []
+                                for hex_part in hex_parts:
+                                    if hex_part:  # Skip empty parts
+                                        unicode_codes.append(int(hex_part, 16))
+                                if unicode_codes:  # Only process if we have valid codes
+                                    new_char = CharDef(unicode_codes, full_path)
+                                    self.charset.add_new_char(new_char)
+                                    valid_count += 1
+                        except ValueError as e:
+                            print(f"Skipping file with invalid format {filename}: {e}")
+                            continue
+                        except Exception as e:
+                            print(f"Failed to process {filename}: {e}")
+                            continue
+        
+        print(f"Found {valid_count} valid characters total")
         self.charset.sort_for_texture()
 
     def save_page(self, texture_to_save, actual_height=None):
@@ -191,15 +270,15 @@ class TextureMerger:
     def next_page(self, texture_to_save):
         if texture_to_save:
             self.save_page(texture_to_save)
-        texture_w, texture_h = fnt_config.common["scaleW"], fnt_config.common["scaleH"]
+        texture_w, texture_h = PAGE_SIZE, PAGE_SIZE
         return Image.new('RGBA', (texture_w, texture_h), (0, 0, 0, 0))
 
     def gen_texture(self):
         self.get_images()
         print(f"Starting texture generation with {len(self.charset.chars)} characters...")
         texture = self.next_page(None)
-        padding = fnt_config.info['padding']
-        spacing = fnt_config.info['spacing']
+        padding = (0, 0, 0, 0)
+        spacing = (1, 1)
         pos_x, pos_y, row_h = 0, 0, 0
         char_count = 0
         max_y_used = 0  # Track the maximum Y position used
@@ -250,8 +329,9 @@ class TextureMerger:
         self.save_page(texture, max_y_used)
         print(f"Generated {len(self.pages)} texture pages")
 
-    def pages_to_str(self):
-        return reduce(lambda page1, page2: str(page1) + str(page2) + "\n", self.pages, "")
+    def get_pages_data(self):
+        # Return pages data for JSON output
+        return [page.to_dict() for page in self.pages]
 
 
 class FntGenerator:
@@ -273,19 +353,22 @@ class FntGenerator:
         
         self.textureMerger.gen_texture()
         
-        # Update the pages count in fnt_config to reflect actual number of pages generated
-        fnt_config.common["pages"] = len(self.textureMerger.pages)
-        print(f"Updated pages count to {fnt_config.common['pages']}")
+        # Generate JSON output instead of .fnt format
+        json_file_name = self.fnt_name + '.json'
+        full_path = os.path.join(out_dir, json_file_name)
+        print(f"Writing JSON font file: {full_path}")
         
-        fnt_file_name = self.fnt_name + '.fnt'
-        full_path = os.path.join(out_dir, fnt_file_name)
-        print(f"Writing font file: {full_path}")
         try:
-            with open(full_path, 'w', encoding='utf8') as fnt:
-                fnt.write(str(fnt_config))
-                fnt.write(self.textureMerger.pages_to_str())
-                fnt.write(str(self.textureMerger.charset))
-            fnt.close()
+            # Create the complete JSON structure
+            font_data = {
+                "info": fnt_config.info,
+                "common": fnt_config.common,
+                "pages": self.textureMerger.get_pages_data(),
+                "chars": self.textureMerger.charset.to_dict()
+            }
+            
+            with open(full_path, 'w', encoding='utf8') as json_file:
+                json.dump(font_data, json_file, separators=(',', ':'), ensure_ascii=False)
             print(f"Successfully created {full_path}")
         except IOError as e:
             print("IOError: save file failed: " + full_path + " - " + str(e))
